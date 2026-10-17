@@ -1,0 +1,33 @@
+name: ci
+on: [push, pull_request]
+concurrency: { group: "ci-${{ github.ref }}", cancel-in-progress: true }
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: pytest -q
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t pulseboard-identity:ci .
+      - name: Boot against Postgres
+        run: |
+          docker network create t
+          docker run -d --name pg --network t -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=identity postgres:16-alpine
+          sleep 8
+          docker run -d --name id --network t -p 8100:8000 \
+            -e ID_DATABASE_URL=postgresql+asyncpg://postgres:pw@pg:5432/identity -e ID_DB_AUTO_CREATE=false \
+            pulseboard-identity:ci
+          for i in $(seq 1 30); do curl -fs localhost:8100/readyz && break; sleep 2; done
+          curl -fs localhost:8100/.well-known/jwks.json | grep -q RS256
+          curl -fs -X POST localhost:8100/api/v1/auth/login -H 'Content-Type: application/json' \
+            -d '{"email":"admin@example.com","password":"Admin-Pulseboard-2026"}' | grep -q access_token
+      - if: failure()
+        run: docker logs id
