@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hmac
+import os
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -59,11 +60,19 @@ def private_key() -> rsa.RSAPrivateKey:
         pem = base64.b64decode(s.jwt_private_key_b64)
     else:  # local development: generate once and keep it on disk so restarts don't invalidate sessions
         path = Path(s.key_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
             key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-            path.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
-                                               serialization.NoEncryption()))
+            pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                    serialization.NoEncryption())
+            tmp = path.with_suffix(f".{os.getpid()}.tmp")
+            tmp.write_bytes(pem)
+            try:
+                os.link(tmp, path)  # atomic: with several workers starting at once, exactly one key wins
+            except FileExistsError:
+                pass
+            finally:
+                tmp.unlink(missing_ok=True)
         pem = path.read_bytes()
     return serialization.load_pem_private_key(pem, password=None)  # type: ignore[return-value]
 
